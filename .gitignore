@@ -7,5 +7,10 @@
 # misc
 .DS_Store
 
+# Python byte-compiled and cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
 # env files (can opt-in for committing if needed)
 .env*

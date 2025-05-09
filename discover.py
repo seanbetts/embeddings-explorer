@@ -98,6 +98,7 @@ def delta_logprob(token_ids, brand_prompt, neutral_prompt) -> float:
 
 def top_token_scan(brand: str) -> set[str]:
     brand_p, neutral_p = prompt_templates(brand, "word")
+    print(f"🔍  [1/4] Top-token scan for '{brand}' (top {TOP_K_TOKENS} tokens)…")
 
     rb = chat_completion(brand_p,   logprobs=True, top_logprobs=TOP_K_TOKENS)
     rn = chat_completion(neutral_p, logprobs=True, top_logprobs=TOP_K_TOKENS)
@@ -113,6 +114,7 @@ def top_token_scan(brand: str) -> set[str]:
         lp_n = neut_top.get(tok, -100.0)
         if lp_b - lp_n > 0:
             out.add(tok.lstrip("Ġ"))
+    print(f"    → {len(out)} candidate tokens found")
     return out
 
 def extend_phrase(brand: str, base_token: str) -> str:
@@ -129,35 +131,51 @@ def extend_phrase(brand: str, base_token: str) -> str:
         phrase = f"{phrase} {r.choices[0].message.content}".strip()
 
 def iterative_extension(brand: str, base_tokens: set[str]) -> set[str]:
+    total = len(base_tokens)
+    print(f"🔍  [2/4] Iterative extension of {total} token(s)…")
     out = set()
-    for tok in base_tokens:
+    for idx, tok in enumerate(base_tokens, start=1):
+        print(f"    [{idx}/{total}] Extending '{tok}'…")
         phrase = extend_phrase(brand, tok)
         if len(phrase.split()) > 1:
             out.add(phrase)
+    print(f"    → {len(out)} extended phrase(s) generated")
     return out
 
 def high_t_sampling(brand: str) -> set[str]:
     prompt = f'List five words or short phrases you associate with "{brand}".'
+    print(f"🔍  [3/4] High-temperature sampling ({HIGH_T_SAMPLES} runs at T={TEMPERATURE_LIST})…")
     out = set()
-    for _ in range(HIGH_T_SAMPLES):
+    # sample multiple times and report progress
+    report_every = max(1, HIGH_T_SAMPLES // 10)
+    for i in range(HIGH_T_SAMPLES):
+        # progress report
+        if (i + 1) % report_every == 0 or i == HIGH_T_SAMPLES - 1:
+            print(f"    {i+1}/{HIGH_T_SAMPLES} runs completed, current set size: {len(out)}")
         r = chat_completion(prompt, max_tokens=50, temperature=TEMPERATURE_LIST)
         text = r.choices[0].message.content
         for line in text.splitlines():
             cleaned = line.strip("•*- \t").lower()
             if 1 <= len(cleaned.split()) <= 4:
                 out.add(cleaned)
+    print(f"    → {len(out)} unique word/phrase(s) collected")
     return out
 
 def competitor_sampling(brand: str) -> set[str]:
     prompt = f'List five companies that compete with "{brand}".'
+    print(f"🔍  [4/4] Competitor sampling ({HIGH_T_SAMPLES} runs)…")
     out = set()
-    for _ in range(HIGH_T_SAMPLES):
+    report_every = max(1, HIGH_T_SAMPLES // 10)
+    for i in range(HIGH_T_SAMPLES):
+        if (i + 1) % report_every == 0 or i == HIGH_T_SAMPLES - 1:
+            print(f"    {i+1}/{HIGH_T_SAMPLES} runs completed, competitors collected: {len(out)}")
         r = chat_completion(prompt, max_tokens=50, temperature=TEMPERATURE_LIST)
         text = r.choices[0].message.content
         for line in text.splitlines():
             cleaned = line.strip("•*- \t")
             if cleaned:
                 out.add(cleaned)
+    print(f"    → {len(out)} unique competitor(s) collected")
     return out
 
 def manual_phrases(path: Path | None) -> set[str]:
