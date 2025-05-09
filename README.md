@@ -1,6 +1,4 @@
-# embeddings-explorer
-
-# Brand–Association Probe (PoC)
+# Embeddings Explorer (PoC)
 
 Measure how strongly **GPT‑4o mini** links a brand to the words, phrases and competitors that people normally mention – without needing any internal model embeddings.
 
