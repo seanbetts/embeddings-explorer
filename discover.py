@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 import openai
 import tiktoken
+import re
 
 # ─── configuration ────────────────────────────────────────────────────────── #
 
@@ -72,6 +73,28 @@ def chat_completion(prompt: str,
         logprobs=logprobs,
         top_logprobs=top_logprobs,
     )
+ 
+# ─── cleaning & deduplication ────────────────────────────────────────────── #
+WORD_RE = re.compile(r"[A-Za-z][A-Za-z '&-]{1,30}")
+
+def clean_phrase(raw: str) -> str | None:
+    """Trim and filter a raw phrase/token, returning cleaned text or None."""
+    p = raw.strip().lstrip("-–—")
+    p = re.sub(r"^\d+\.\s*", "", p)
+    if p and WORD_RE.fullmatch(p):
+        return p
+    return None
+
+def dedupe_rows(rows: list[tuple[str,str,str,any,str]]) -> list[tuple[str,str,str,any,str]]:
+    """Remove duplicate (brand, phrase) entries, case-insensitive."""
+    seen = set()
+    unique = []
+    for brand, phrase, source, delta_lp, ts in rows:
+        key = (brand, phrase.lower())
+        if key not in seen:
+            seen.add(key)
+            unique.append((brand, phrase, source, delta_lp, ts))
+    return unique
 
 def prompt_templates(brand: str, kind: str) -> tuple[str, str]:
     quoted = f'"{brand}"'
@@ -81,6 +104,9 @@ def prompt_templates(brand: str, kind: str) -> tuple[str, str]:
     if kind == "competitor":
         return (f"A company that competes with {quoted} is →",
                 "A company that competes with ____ is →")
+    if kind == "phrase":
+        return (f"A phrase I associate with {quoted} is →",
+                "A phrase I associate with ____ is →")
     raise ValueError(f"Unknown kind: {kind}")
 
 def delta_logprob(token_ids, brand_prompt, neutral_prompt) -> float:
@@ -118,25 +144,37 @@ def top_token_scan(brand: str) -> set[str]:
     return out
 
 def extend_phrase(brand: str, base_token: str) -> str:
-    neutral_p = prompt_templates(brand, "word")[1]
+    # use consistent phrase-based prompts for brand vs neutral
+    brand_template, neutral_template = prompt_templates(brand, "phrase")
     phrase = base_token
     while True:
-        candidate_prompt = f'A phrase I associate with "{brand}" is {phrase} →'
+        # build brand and neutral prompts including current phrase
+        brand_p = f"{brand_template} {phrase} →"
+        neutral_p = f"{neutral_template} {phrase} →"
         token_ids = ENC.encode(phrase)
-        delta = delta_logprob(token_ids, candidate_prompt, neutral_p)
+        delta = delta_logprob(token_ids, brand_p, neutral_p)
+        # stop if association drops below threshold or phrase too long
         if delta < ITER_EXT_THRESHOLD or len(token_ids) >= 6:
             return phrase
-        r = chat_completion(candidate_prompt, max_tokens=1,
-                            temperature=0.0, logprobs=True, top_logprobs=TOP_K_TOKENS)
-        phrase = f"{phrase} {r.choices[0].message.content}".strip()
+        # deterministically pick next token under brand prompt
+        r = chat_completion(brand_p,
+                            max_tokens=1,
+                            temperature=0.0,
+                            logprobs=True,
+                            top_logprobs=TOP_K_TOKENS)
+        next_tok = r.choices[0].message.content
+        phrase = f"{phrase} {next_tok}".strip()
 
 def iterative_extension(brand: str, base_tokens: set[str]) -> set[str]:
-    total = len(base_tokens)
+    # filter out junk tokens before extension
+    filtered = [tok for tok in base_tokens if clean_phrase(tok) is not None]
+    total = len(filtered)
     print(f"🔍  [2/4] Iterative extension of {total} token(s)…")
     out = set()
-    for idx, tok in enumerate(base_tokens, start=1):
+    for idx, tok in enumerate(filtered, start=1):
         print(f"    [{idx}/{total}] Extending '{tok}'…")
         phrase = extend_phrase(brand, tok)
+        # only keep multi-word phrases
         if len(phrase.split()) > 1:
             out.add(phrase)
     print(f"    → {len(out)} extended phrase(s) generated")
@@ -162,7 +200,10 @@ def high_t_sampling(brand: str) -> set[str]:
     return out
 
 def competitor_sampling(brand: str) -> set[str]:
-    prompt = f'List five companies that compete with "{brand}".'
+    prompt = (
+        f'List five company names that compete with "{brand}". '
+        'Return plain names, one per line, no extra words.'
+    )
     print(f"🔍  [4/4] Competitor sampling ({HIGH_T_SAMPLES} runs)…")
     out = set()
     report_every = max(1, HIGH_T_SAMPLES // 10)
@@ -204,14 +245,22 @@ def main() -> None:
     rivals      = competitor_sampling(brand)
 
     now = utcnow_iso()
-    rows = []
-
+    rows: list[tuple[str,str,str,any,str]] = []
+    # assemble and clean phrases
     for phr in sorted(words_top | words_iter | words_highT):
-        rows.append((brand, phr, "auto_word",       None, now))
+        cleaned = clean_phrase(phr)
+        if cleaned:
+            rows.append((brand, cleaned, "auto_word", None, now))
     for riv in sorted(rivals):
-        rows.append((brand, riv, "auto_competitor", None, now))
+        cleaned = clean_phrase(riv)
+        if cleaned:
+            rows.append((brand, cleaned, "auto_competitor", None, now))
     for phr in sorted(manual_set):
-        rows.append((brand, phr, "manual",          None, now))
+        cleaned = clean_phrase(phr)
+        if cleaned:
+            rows.append((brand, cleaned, "manual", None, now))
+    # remove duplicates within this run
+    rows = dedupe_rows(rows)
 
     save_csv(rows, args.outfile)
     print(f"✅  {len(rows):,} phrases written → {args.outfile}")
